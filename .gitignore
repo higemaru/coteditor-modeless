@@ -1,0 +1,26 @@
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+#os
+.DS_Store
+Thumbs.db
+
+#emacs
+*~
+\#*\#
+\.\#*
+
+#vim
+[._]*.s[a-w][a-z]
+[._]s[a-w][a-z]
+
+#claude code
+.claude/
+
+# Runtime data
+_oldies/
+
+*.zip
