@@ -5,6 +5,9 @@
 //   2. Delete（選択範囲を削除）→ かな(IME ON) → ローマ字を物理キーで送信 → Space（変換開始）
 //   3. Enter / テンキーEnter / Ctrl+M を検知したら 英数 を送って IME OFF
 // 各イベントの修飾フラグは明示的に空にするので、Ctrl 押下中でも Ctrl+K などにならない。
+// キー送信中・英数の送信待ちに届いた要求は、拒否してビープで知らせる。
+// 要求を受け取った時の最前面アプリを覚えておき、最前面が変わったらキー送信を中断する
+// （別のアプリに打ち込まないため）。確定キーも、そのアプリで押された時だけ扱う。
 //
 // 常駐させる理由: CotEditor 経由の起動は約0.5秒かかるため、起動を1回きりにする。
 // 終了時（SIGTERM / SIGINT / 通常終了）は FIFO を削除する。FIFO が無ければ
@@ -19,6 +22,7 @@
 
 import Foundation
 import CoreGraphics
+import AppKit
 
 // ユーザーごとの一時ディレクトリ（/var/folders/.../T/）。getconf DARWIN_USER_TEMP_DIR と同じ値。
 // 他のユーザーも書き込める /tmp を避けるため。環境変数 TMPDIR は起動元によって違うことがあるので使わない
@@ -92,22 +96,63 @@ func postUnicode(_ ch: Character) {
 }
 
 // --- 状態（main キューからのみ触る） ---
-var waitingConfirm = false
-var confirmGeneration = 0
+// idle → typing（キー送信中）→ waiting（確定待ち）→ finishing（英数の送信待ち）→ idle
+enum Phase { case idle, typing, waiting, finishing }
+var phase = Phase.idle
+var generation = 0          // 要求ごとに増やす。古いタイマーや中断の通知を無視するため
+var targetPid: pid_t = -1   // 要求を受け取った時の最前面アプリ
 var eventTap: CFMachPort?
 
-// キー送信は直列のワーカーで行う（要求が重なっても順番に処理）
+// キー送信は直列のワーカーで行う
 let worker = DispatchQueue(label: "modeless.worker", qos: .userInteractive)
 
-func typeAndConvert(_ text: String) {
-    log("request: \(text)")
+// 最前面アプリの pid（main キューから呼ぶ。NSWorkspace の値は main の run loop で更新される）
+func frontmostPid() -> pid_t {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
+}
+
+// FIFO から 1行届いた時（main キュー）
+func handleRequest(_ text: String) {
+    switch phase {
+    case .typing, .finishing:
+        log("busy (\(phase)), rejected: \(text)")
+        NSSound.beep()
+        return
+    // 確定待ちの間に届いた要求は、新しい要求として受け付ける。
+    // Enter 以外で確定した・Esc で取り消した場合も waiting のまま残るため、拒否すると最大 30 秒変換できなくなる。
+    // 変換中の文字列がある間の Ctrl+J は IME が受け取るので、ここには届かない
+    case .idle, .waiting:
+        break
+    }
+    generation += 1
+    let g = generation
+    let pid = frontmostPid()
+    targetPid = pid
+    phase = .typing
+    worker.async { typeAndConvert(text, pid: pid, generation: g) }
+}
+
+func typeAndConvert(_ text: String, pid: pid_t, generation g: Int) {
+    log("request: \(text) (pid \(pid))")
+
+    // 最前面のアプリが変わっていたら、それ以上キーを送らない
+    func stillFront() -> Bool {
+        if DispatchQueue.main.sync(execute: frontmostPid) == pid { return true }
+        log("frontmost changed, aborted")
+        DispatchQueue.main.async { if generation == g { phase = .idle } }
+        return false
+    }
+
+    guard stillFront() else { return }
     post(deleteKey)                // Delete（選択範囲を削除）
     log("delete posted")
     usleep(afterDeleteWait)
+    guard stillFront() else { return }
     post(imeOnKey)                 // かな (IME ON)
     log("kana posted")
     usleep(imeOnWait)
     for ch in text {
+        guard stillFront() else { return }
         let lower = Character(String(ch).lowercased())
         let isUpper = (String(ch) != String(ch).lowercased())
         if let code = keyMap[lower] {
@@ -119,16 +164,16 @@ func typeAndConvert(_ text: String) {
     }
     log("typed")
     usleep(beforeSpaceWait)
+    guard stillFront() else { return }
     post(spaceKey)                 // Space（変換開始）
     log("space sent")
 
     // 確定待ちを開始（30秒で自動解除）
     DispatchQueue.main.async {
-        waitingConfirm = true
-        confirmGeneration += 1
-        let g = confirmGeneration
+        guard generation == g else { return }
+        phase = .waiting
         DispatchQueue.main.asyncAfter(deadline: .now() + watchTimeoutSec) {
-            if confirmGeneration == g { waitingConfirm = false }
+            if generation == g && phase == .waiting { phase = .idle }
         }
     }
 }
@@ -139,15 +184,22 @@ let confirmCallback: CGEventTapCallBack = { _, type, event, _ in
         if let t = eventTap { CGEvent.tapEnable(tap: t, enable: true) }
         return Unmanaged.passUnretained(event)
     }
-    if type == .keyDown && waitingConfirm {
+    if type == .keyDown && phase == .waiting {
         let code = event.getIntegerValueField(.keyboardEventKeycode)
         let ctrlConfirm = confirmWithCtrlKeyCodes.contains(code) && event.flags.contains(.maskControl)
         if confirmKeyCodes.contains(code) || ctrlConfirm {
-            waitingConfirm = false
+            // 別のアプリで押された確定キーは無視する（元のアプリに戻って確定するのを待ち続ける）
+            guard frontmostPid() == targetPid else {
+                log("confirm key \(code) in another app, ignored")
+                return Unmanaged.passUnretained(event)
+            }
+            phase = .finishing
+            let g = generation
             log("confirm key \(code)")
             worker.asyncAfter(deadline: .now() + .microseconds(afterConfirmWait)) {
                 post(imeOffKey, hold: 30_000)    // 英数 (IME OFF)
                 log("eisu sent")
+                DispatchQueue.main.async { if generation == g { phase = .idle } }
             }
         }
     }
@@ -201,7 +253,7 @@ fifoHandle.readabilityHandler = { h in
         let lineData = inputBuffer.subdata(in: inputBuffer.startIndex..<nl)
         inputBuffer.removeSubrange(inputBuffer.startIndex...nl)
         if let line = String(data: lineData, encoding: .utf8), !line.isEmpty {
-            worker.async { typeAndConvert(line) }
+            DispatchQueue.main.async { handleRequest(line) }
         }
     }
 }

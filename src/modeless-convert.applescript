@@ -51,7 +51,7 @@ else
 end if
 
 set n to loc + len - startPos
-if n < 1 then return
+if n < 1 or targetText is "" then return
 
 -- 選択範囲を使う場合は、ローマ字・数字・- , . だけで構成されている時に限る
 -- （日本語を誤って選択したまま実行しても、消して再入力しない）
@@ -71,13 +71,18 @@ tell application "CotEditor"
 	end tell
 end tell
 
-if targetText is "" then return
-
 -- 4) 常駐プロセスへ送る。
 --    1<> は読み書きで開くので、読み手がいなくてもブロックしない。
---    FIFO が無い（常駐していない）場合はシェルが失敗するので、ビープで知らせる。
+--    FIFO が無い（常駐していない）場合はシェルが失敗するので、選択を元に戻してビープで知らせる。
 try
 	do shell script "f=" & fifoShellPath & "; [ -p \"$f\" ] && printf '%s\\n' " & quoted form of targetText & " 1<>\"$f\""
 on error
+	try
+		tell application "CotEditor"
+			tell front document
+				set range of selection to {loc, len}
+			end tell
+		end tell
+	end try
 	beep
 end try
