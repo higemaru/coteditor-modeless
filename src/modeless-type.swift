@@ -44,6 +44,10 @@ let keyMap: [Character: CGKeyCode] = [
     "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40,
     "n": 45, "m": 46, "-": 27, ",": 43, ".": 47, " ": 49,
 ]
+// Shift を押して出す記号（US・JIS 配列とも同じ位置）
+let shiftedKeyMap: [Character: CGKeyCode] = [
+    "!": 18, "?": 44,
+]
 
 // --- キーコード設定（IME や環境に合わせてここだけ変える）---
 // IME ON/OFF: 「かな」「英数」の仮想キーコード（物理キーに依存しない）。
@@ -157,6 +161,8 @@ func typeAndConvert(_ text: String, pid: pid_t, generation g: Int) {
         let isUpper = (String(ch) != String(ch).lowercased())
         if let code = keyMap[lower] {
             post(code, shift: isUpper)
+        } else if let code = shiftedKeyMap[ch] {
+            post(code, shift: true)
         } else {
             postUnicode(ch)
         }

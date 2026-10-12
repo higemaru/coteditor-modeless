@@ -6,7 +6,7 @@
 -- 前提: modeless-type が LaunchAgent で常駐していること（modeless-type.swift 冒頭参照）
 
 property maxScan : 100
-property romajiChars : "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-,."
+property romajiChars : "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-,.!?"
 -- FIFO はユーザーごとの一時ディレクトリに置かれる（modeless-type.swift の fifoPath と同じ）
 property fifoShellPath : "\"$(getconf DARWIN_USER_TEMP_DIR)modeless-type.fifo\""
 
@@ -53,7 +53,7 @@ end if
 set n to loc + len - startPos
 if n < 1 or targetText is "" then return
 
--- 選択範囲を使う場合は、ローマ字・数字・- , . だけで構成されている時に限る
+-- 選択範囲を使う場合は、ローマ字・数字・- , . ! ? だけで構成されている時に限る
 -- （日本語を誤って選択したまま実行しても、消して再入力しない）
 if len > 0 then
 	repeat with ch in characters of targetText
