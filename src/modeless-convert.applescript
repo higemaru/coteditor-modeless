@@ -1,14 +1,25 @@
 -- modeless-convert.applescript
--- カーソル直前の「ローマ字（英数字）の連なり」を選択し、
+-- カーソル直前の「ASCII 文字（スペース以外）の連なり」を選択し、
 -- 常駐している modeless-type（FIFO 経由）に渡して 削除 → IME ON → 変換 → 確定後 IME OFF を行う。
--- 日本語・スペース・改行に当たったところで遡りを止める。
+-- 日本語・スペース・タブ・改行・行頭に当たったところで遡りを止める。
 -- 前提: CotEditor の range は {location(0始まり), length}
 -- 前提: modeless-type が LaunchAgent で常駐していること（modeless-type.swift 冒頭参照）
 
 property maxScan : 100
-property romajiChars : "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-,.!?"
 -- FIFO はユーザーごとの一時ディレクトリに置かれる（modeless-type.swift の fifoPath と同じ）
 property fifoShellPath : "\"$(getconf DARWIN_USER_TEMP_DIR)modeless-type.fifo\""
+
+-- 変換対象の文字か: ASCII の印字可能文字（! から ~ まで。スペースは含まない）
+-- どのキーで打つかは modeless-type がキーボードレイアウトから決める
+on isTargetChar(c)
+	try
+		set i to id of c
+		if class of i is not integer then return false -- 複数のコードポイントからなる文字（絵文字など）
+		return i >= 33 and i <= 126
+	on error
+		return false
+	end try
+end isTargetChar
 
 set targetText to ""
 
@@ -34,7 +45,7 @@ if len is 0 then
 	set j to segLen
 	set k to j
 	repeat while j > 0
-		if romajiChars contains (character j of seg) then
+		if my isTargetChar(character j of seg) then
 			set k to j
 			set j to j - 1
 		else
@@ -53,11 +64,11 @@ end if
 set n to loc + len - startPos
 if n < 1 or targetText is "" then return
 
--- 選択範囲を使う場合は、ローマ字・数字・- , . ! ? だけで構成されている時に限る
--- （日本語を誤って選択したまま実行しても、消して再入力しない）
+-- 選択範囲を使う場合は、変換対象の文字だけで構成されている時に限る
+-- （日本語やスペースを含めて選択したまま実行しても、消して再入力しない）
 if len > 0 then
 	repeat with ch in characters of targetText
-		if not (romajiChars contains (ch as text)) then
+		if not my isTargetChar(contents of ch) then
 			beep
 			return
 		end if

@@ -2,7 +2,8 @@
 //
 // 役割: 「いま選択されている範囲」を対象に、IME ON → 変換 → 確定後に IME OFF までを行う。
 //   1. FIFO（ユーザーごとの一時ディレクトリの modeless-type.fifo）から 1行 = ローマ字テキスト を受け取る
-//   2. Delete（選択範囲を削除）→ かな(IME ON) → ローマ字を物理キーで送信 → Space（変換開始）
+//   2. Delete（選択範囲を削除）→ かな(IME ON) → ローマ字をキー入力で送信 → Space（変換開始）
+//      （どの文字をどのキーで送るかは、いまのキーボードレイアウトに問い合わせて決める）
 //   3. Enter / テンキーEnter / Ctrl+M を検知したら 英数 を送って IME OFF
 // 各イベントの修飾フラグは明示的に空にするので、Ctrl 押下中でも Ctrl+K などにならない。
 // キー送信中・英数の送信待ちに届いた要求は、拒否してビープで知らせる。
@@ -23,6 +24,7 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import Carbon.HIToolbox
 
 // ユーザーごとの一時ディレクトリ（/var/folders/.../T/）。getconf DARWIN_USER_TEMP_DIR と同じ値。
 // 他のユーザーも書き込める /tmp を避けるため。環境変数 TMPDIR は起動元によって違うことがあるので使わない
@@ -36,18 +38,6 @@ func userTempDir() -> String {
 let fifoPath = userTempDir() + "modeless-type.fifo"
 let logPath = NSHomeDirectory() + "/Library/Logs/modeless-type.log"
 let debugLog = false  // 調査時だけ true（失敗系のログは常に ~/Library/Logs/modeless-type.log に出る）
-
-let keyMap: [Character: CGKeyCode] = [
-    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
-    "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
-    "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29,
-    "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40,
-    "n": 45, "m": 46, "-": 27, ",": 43, ".": 47, " ": 49,
-]
-// Shift を押して出す記号（US・JIS 配列とも同じ位置）
-let shiftedKeyMap: [Character: CGKeyCode] = [
-    "!": 18, "?": 44,
-]
 
 // --- キーコード設定（IME や環境に合わせてここだけ変える）---
 // IME ON/OFF: 「かな」「英数」の仮想キーコード（物理キーに依存しない）。
@@ -89,14 +79,43 @@ func post(_ code: CGKeyCode, shift: Bool = false, hold: UInt32 = 0) {
     }
 }
 
-func postUnicode(_ ch: Character) {
-    let utf16 = Array(String(ch).utf16)
-    for down in [true, false] {
-        guard let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { continue }
-        e.flags = CGEventFlags(rawValue: 0)
-        e.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        e.post(tap: .cghidEventTap)
+// --- 文字 → キー（キーコードと Shift）の対応表 ---
+// 文字列のイベント（keyboardSetUnicodeString）は IME に届かないので、すべてキー入力として送る。
+// 対応表は固定せず、いまの ASCII 用レイアウト（日本語 IME がローマ字入力に使う配列）に問い合わせて作る。
+// US / JIS など、配列による記号の位置の違いもこれで吸収する。
+typealias KeyStroke = (code: CGKeyCode, shift: Bool)
+
+// テンキーは使わない（IME の設定によっては、テンキーからの入力が半角のまま確定するため）
+let keypadKeyCodes: Set<CGKeyCode> = [65, 67, 69, 71, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92]
+
+// main キューから呼ぶ（Text Input Sources の API は main スレッドで使う前提）
+func buildKeyMap() -> [Character: KeyStroke] {
+    guard let src = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+          let ptr = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData) else {
+        log("keyboard layout unavailable", force: true)
+        return [:]
     }
+    let data = Unmanaged<CFData>.fromOpaque(ptr).takeUnretainedValue() as Data
+    let kbType = UInt32(LMGetKbdType())
+    var map: [Character: KeyStroke] = [:]
+    data.withUnsafeBytes { raw in
+        guard let layout = raw.bindMemory(to: UCKeyboardLayout.self).baseAddress else { return }
+        for shift in [false, true] {    // 同じ文字が出せるなら Shift なしを優先
+            let mods: UInt32 = shift ? UInt32(shiftKey >> 8) & 0xFF : 0
+            for code in CGKeyCode(0)..<128 where !keypadKeyCodes.contains(code) {
+                var dead: UInt32 = 0
+                var len = 0
+                var chars = [UniChar](repeating: 0, count: 4)
+                let st = UCKeyTranslate(layout, code, UInt16(kUCKeyActionDown), mods, kbType,
+                                        0, &dead, chars.count, &len, &chars)
+                // デッドキー（次の文字と合成されるキー）は、押すと文字がそのまま出ないので使わない
+                guard st == noErr, dead == 0, len == 1, let u = UnicodeScalar(chars[0]) else { continue }
+                let ch = Character(u)
+                if map[ch] == nil { map[ch] = (code, shift) }
+            }
+        }
+    }
+    return map
 }
 
 // --- 状態（main キューからのみ触る） ---
@@ -128,15 +147,25 @@ func handleRequest(_ text: String) {
     case .idle, .waiting:
         break
     }
+    // キーで打てない文字が 1 つでもあれば、何も送らずに断る（途中で文字が消えないように）
+    let keyMap = buildKeyMap()
+    let missing = text.filter { keyMap[$0] == nil }
+    guard missing.isEmpty else {
+        log("no key for \"\(missing)\", rejected: \(text)", force: true)
+        NSSound.beep()
+        return
+    }
+    let strokes = text.map { keyMap[$0]! }
+
     generation += 1
     let g = generation
     let pid = frontmostPid()
     targetPid = pid
     phase = .typing
-    worker.async { typeAndConvert(text, pid: pid, generation: g) }
+    worker.async { typeAndConvert(text, strokes, pid: pid, generation: g) }
 }
 
-func typeAndConvert(_ text: String, pid: pid_t, generation g: Int) {
+func typeAndConvert(_ text: String, _ strokes: [KeyStroke], pid: pid_t, generation g: Int) {
     log("request: \(text) (pid \(pid))")
 
     // 最前面のアプリが変わっていたら、それ以上キーを送らない
@@ -155,17 +184,9 @@ func typeAndConvert(_ text: String, pid: pid_t, generation g: Int) {
     post(imeOnKey)                 // かな (IME ON)
     log("kana posted")
     usleep(imeOnWait)
-    for ch in text {
+    for s in strokes {
         guard stillFront() else { return }
-        let lower = Character(String(ch).lowercased())
-        let isUpper = (String(ch) != String(ch).lowercased())
-        if let code = keyMap[lower] {
-            post(code, shift: isUpper)
-        } else if let code = shiftedKeyMap[ch] {
-            post(code, shift: true)
-        } else {
-            postUnicode(ch)
-        }
+        post(s.code, shift: s.shift)
         usleep(keyGap)
     }
     log("typed")
