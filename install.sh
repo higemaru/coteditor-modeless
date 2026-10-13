@@ -90,6 +90,9 @@ do_install() {
     unload
     mkdir -p "$(dirname "$PLIST")"
     cp "$SRC/modeless-type.plist" "$PLIST"
+    # ダウンロードした zip 由来の quarantine 属性が cp で引き継がれると、
+    # launchctl bootstrap が "Input/output error" で失敗する
+    xattr -c "$PLIST" 2>/dev/null || true
     # ProgramArguments.0 への -replace は置換ではなく挿入になるので、配列ごと作り直す
     plutil -replace ProgramArguments -array "$PLIST"
     plutil -insert ProgramArguments -string "$BIN" -append "$PLIST"
@@ -99,6 +102,7 @@ do_install() {
     info "AppleScript: $SCRIPT_DIR/$SCRIPT_NAME"
     mkdir -p "$SCRIPT_DIR"
     cp "$SRC/$SCRIPT_NAME" "$SCRIPT_DIR/$SCRIPT_NAME"
+    xattr -c "$SCRIPT_DIR/$SCRIPT_NAME" 2>/dev/null || true   # quarantine 属性を引き継がない
     # 名前を変えて置いている旧版があれば知らせる（ショートカット用に改名している場合など）
     local f
     for f in "$SCRIPT_DIR"/modeless-convert* "$SCRIPT_DIR"/ModelessConvert*; do

@@ -108,6 +108,7 @@ launchctl kickstart -k gui/$(id -u)/local.modeless-type   # 再起動する（�
 | 範囲が選択されるだけで何も起きない | アクセシビリティの許可が無効（再ビルド後に多い） |
 | 変換はできるが、確定後に IME が OFF にならない | 入力監視の許可が無効。`~/Library/Logs/modeless-type.log` に `tapCreate failed` が出る |
 | 頭の数文字が取りこぼされる | `imeOnWait` を 100ms → 150ms にして、`./install.sh` で入れ直す |
+| 常駐しない（`launchctl list \| grep modeless` に出ない）。`launchctl bootstrap` が `Input/output error` で失敗する | plist に quarantine 属性（ダウンロード由来）が付いている。`xattr -c ~/Library/LaunchAgents/local.modeless-type.plist` で外してから `bootstrap` し直す。現在の `install.sh` は自動で外す |
 | Ctrl+J で何も起きない（ビープもなし） | 直前がローマ字でない（日本語・スペース・改行の直後）。仕様 |
 
 調査したい時は、Swift 冒頭の `debugLog` を `true` にして、`./install.sh` で再インストール
